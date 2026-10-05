@@ -5,7 +5,7 @@
 // 小写十六进制。build.ps1 会现场重算并对比它，决定要不要重新生成字形：
 //   · 一致 且 font_atlas.bin 在 → 直接复用（别人 clone 下来就是这样）
 //   · 不一致 / 产物缺失       → 跑字形流水线（需要 Windows 的 System.Drawing）
-#define FONT_SRC_HASH "8762abb9c2e18d6391448aea0f04ef0161dd8dd3b7c2a3042cb2856eaeab6e867b7072d5a10eeda6b848b7830c4cd7da3e1c98e49037e9c0483910b3d5f98135"
+#define FONT_SRC_HASH "e8b820898a81aea2c11867d9f2670f6cc3e481f7421c4a7a75597b4f04fd3f4dadd51ec7c4c4b7a22d087d5c5c9498b6e364be4c32b9c0cb1c5e48a43d8861bf"
 
 #ifndef CS_FONT_META_H
 #define CS_FONT_META_H

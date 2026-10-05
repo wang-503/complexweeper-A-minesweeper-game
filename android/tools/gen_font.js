@@ -225,8 +225,17 @@ fs.writeFileSync(binPath, Buffer.concat([header, ...pageBytes]));
 //
 // 现在改成自洽：font_meta.h 里记着"我是由哪两个文件的哪个哈希生成的"，
 // build.ps1 现场重算、对比自己。缺任何一个产物、或哈希不符，就重新生成。
-// 哈希只与**内容**有关，跨平台 / 跨换行符都不变（文件按二进制读）。
-const hashSrc = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+//
+// **哈希必须先归一化换行符**。这一条是踩出来的：同样的文件，我本机上
+// tools/ui_strings.js 是 CRLF（6147 字节），而 git blob 里是 LF（6004 字节），
+// 于是"我算出的哈希"和"任何人 clone 出来算出的哈希"必然不同 —— 每个新克隆
+// 都会判定需要重新生成，而那条流水线依赖 Windows 的 System.Drawing，
+// 别人根本跑不了。哈希的可复现性不能依赖"检出时的行尾"。
+// 归一化只影响换行符；内容（含换行符以外的所有字节）仍然参与哈希。
+const hashSrc = (p) => {
+  const norm = fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
+  return crypto.createHash('sha256').update(norm, 'utf8').digest('hex');
+};
 const hashUi = hashSrc(path.join(root, 'tools', 'ui_strings.js'));
 const hashGen = hashSrc(__filename);
 const srcHash = (hashUi + hashGen).toLowerCase();

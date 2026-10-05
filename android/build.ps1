@@ -142,10 +142,26 @@ if ($uiVer -ne $version) {
 # 把哈希写进产物自己，就不存在"两份东西要同时更新"的问题了。
 #
 # gen_font.js 也必须进哈希：它决定图集怎么排布，只按文案判断会漏掉排布改动。
+#
+# **哈希前必须把 CRLF 归一成 LF**，且算法要和 gen_font.js 里那两行完全一致。
+# 为什么：同一个 tools/ui_strings.js 在我本机工作区是 CRLF、在 git blob 里是 LF，
+# 直接对文件字节做 SHA256 会得出两个值 —— 于是"本机算的"和"别人 clone 出来算的"
+# 永远不同，每个新克隆都会去重新跑字形流水线（而那依赖 Windows 的 System.Drawing）。
+# 归一化只吃掉换行符，其余字节照常参与哈希。
+function Get-FontSrcHash([string[]]$paths) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $sb = [System.Text.StringBuilder]::new()
+    foreach ($p in $paths) {
+        $text = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8) -replace "`r`n", "`n"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+        foreach ($b in $sha.ComputeHash($bytes)) { [void]$sb.Append($b.ToString('x2')) }
+    }
+    return $sb.ToString()
+}
 $fontAtlasBin = Join-Path $assetsDir 'font_atlas.bin'
 $fontMetaH = Join-Path $srcDir 'font_meta.h'
-$fontHashSrc = (Get-FileHash -LiteralPath (Join-Path $root 'tools\ui_strings.js') -Algorithm SHA256).Hash +
-               (Get-FileHash -LiteralPath (Join-Path $root 'tools\gen_font.js') -Algorithm SHA256).Hash
+$fontHashSrc = (Get-FontSrcHash @((Join-Path $root 'tools\ui_strings.js'),
+                                  (Join-Path $root 'tools\gen_font.js'))).ToUpperInvariant()
 
 $needFont = $true
 if ((Test-Path -LiteralPath $fontMetaH) -and (Test-Path -LiteralPath $fontAtlasBin)) {
