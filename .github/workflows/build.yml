@@ -1,6 +1,7 @@
 name: build
 
-# push / PR 都构建一遍，附件里给出 exe 与两份自检报告
+# push / PR 都构建一遍：Windows 版与安卓版各一个 job，
+# artifact 里给出 exe / apk 与两份自检报告，任一端失败都能一眼看出是哪一端。
 on:
   push:
     branches: [main]
@@ -56,9 +57,79 @@ jobs:
       - name: 上传产物与自检报告
         uses: actions/upload-artifact@v5
         with:
-          name: complexweeper-${{ github.sha }}
+          name: complexweeper-windows-${{ github.sha }}
           path: |
             正式版/复扫雷*.exe
             正式版/build/selftest.txt
             正式版/build/uitest.txt
+          if-no-files-found: error
+
+  # 安卓版单独一个 job：它不需要 Zig，但需要 JDK。
+  # 两端各自跑，任一端失败都能从 check 列表一眼看出是哪一端。
+  android:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      # android/build.ps1 用 JDK 的 java/keytool；runner 上默认那个未必是 21。
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # 安卓版的跨端对照要拿 Windows 版的 exe 当参照物，所以先在本 job 里
+      # 构建 Windows 版（它很快，约 20 秒）。缓存 Zig 省下下载时间。
+      - name: 缓存 Zig
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/zig
+          key: zig-0.14.1-windows
+
+      - name: 装 Zig 0.14.1
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $dest = Join-Path $env:RUNNER_TEMP 'zig'
+          $exe = Join-Path $dest 'zig-x86_64-windows-0.14.1\zig.exe'
+          if (-not (Test-Path $exe)) {
+            $url = 'https://ziglang.org/download/0.14.1/zig-x86_64-windows-0.14.1.zip'
+            $zip = Join-Path $env:RUNNER_TEMP 'zig.zip'
+            Invoke-WebRequest -Uri $url -OutFile $zip
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Expand-Archive $zip -DestinationPath $dest -Force
+          }
+          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+          (Split-Path $exe -Parent) | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $got = & $exe version
+          Write-Host "zig = $got"
+          if ($got -ne '0.14.1') { throw "Zig 版本不对：$got" }
+
+      - name: 构建 Windows 版（给跨端对照当参照物）
+        shell: pwsh
+        run: ./正式版/build.ps1
+
+      # NDK / build-tools / platform 缺了会自动下载到 android/.android-tools/
+      # （首次约 900 MB，所以这里缓存它；键里带 NDK 版本号，换版本自动失效）。
+      - name: 缓存安卓工具链
+        uses: actions/cache@v4
+        with:
+          path: android/.android-tools
+          key: android-tools-ndk-r27c-bt-36-platform-35
+
+      - name: 构建安卓版 + 自检 + 跨端对照
+        shell: pwsh
+        run: ./android/build.ps1
+
+      - name: 上传 APK 与自检报告
+        uses: actions/upload-artifact@v5
+        with:
+          name: complexweeper-android-${{ github.sha }}
+          path: |
+            android/build/复扫雷-android-*.apk
+            android/build/selftest.txt
+            android/build/uitest.txt
           if-no-files-found: error
