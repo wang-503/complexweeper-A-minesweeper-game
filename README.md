@@ -2,7 +2,7 @@
 
 > 扫雷，但雷是**复数**：格子上的数字是周围所有雷之和的**模长**。
 
-[![build](https://github.com/Yueqing-Chen/complexweeper/actions/workflows/build.yml/badge.svg)](https://github.com/Yueqing-Chen/complexweeper/actions/workflows/build.yml)
+[![build](https://github.com/wang-503/complexweeper-A-minesweeper-game/actions/workflows/build.yml/badge.svg)](https://github.com/wang-503/complexweeper-A-minesweeper-game/actions/workflows/build.yml)
 [![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Android-lightgrey.svg)](#下载与安装)
 
@@ -51,7 +51,7 @@
 
 ### Android
 
-从 [Releases](../../releases) 下载 `复扫雷-android-<版本>.apk`，传到手机上安装。
+从 [Releases](https://github.com/wang-503/complexweeper-A-minesweeper-game/releases) 下载 `复扫雷-android-<版本>.apk`，传到手机上安装。
 
 - 要求 **Android 7.0（API 24）** 以上，支持 `arm64-v8a` 与 `x86_64`
 - 只有**横屏**（专家盘一屏放不下，竖屏没有意义）
@@ -59,7 +59,7 @@
 
 ### Windows
 
-从 [Releases](../../releases) 下载 `复扫雷 <版本>.exe`，**双击即可运行**。
+从 [Releases](https://github.com/wang-503/complexweeper-A-minesweeper-game/releases) 下载 `复扫雷 <版本>.exe`，**双击即可运行**。
 
 - **不需要** .NET、不需要运行库、不需要安装 —— 单个 exe，全部静态链接，约 400 KB
 - 素材与代码都编译进 exe 里（图标、位图、字形全部内嵌）
@@ -215,6 +215,13 @@ complexweeper/
 - **上游项目**：本仓库的 Windows 版与原始设计来自
   [Yueqing-Chen/complexweeper](https://github.com/Yueqing-Chen/complexweeper)；
   `android/` 下的安卓移植是在此基础上的独立实现。
+  上游的后续更新可以这样同步进来：
+
+  ```powershell
+  git remote add upstream https://github.com/Yueqing-Chen/complexweeper.git
+  git fetch upstream
+  git merge upstream/main
+  ```
 
 本程序与 Microsoft 公司**无隶属关系**。
 

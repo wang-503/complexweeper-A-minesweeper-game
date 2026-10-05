@@ -227,8 +227,12 @@ adb logcat -s complexsweeper:V AndroidRuntime:E
 - 帧缓冲尺寸 = 窗口尺寸（没有缩放层），所以**只有软件渲染**：1920×1080 下
   每帧要重画约 200 万像素。因为只在有输入/动画时出帧（空闲 50ms 轮询），
   实际占用可以接受；但要是以后加持续动画，得先改成局部重绘。
-- 不接 CI（按需求）。要接的话加一个 workflow，思路照 `.github/workflows/build.yml`，
-  只是要先把 NDK 与 build-tools 装好。
+- **CI 目前只构建 Windows 版**（`.github/workflows/build.yml`）。安卓版没有进 CI，
+  因为字形流水线依赖 Windows 的 `System.Drawing`、而 `android_toolchain.ps1` 里的
+  NDK/build-tools 路径与下载文件名都是 Windows 专用的。
+  仓库里提交了字形生成物，所以**构建本身**不再需要跑那条流水线；
+  但要在 Linux runner 上构建，仍得先把工具链探测改成跨平台
+  （NDK 用 `linux-x86_64`、build-tools 用 `_linux.zip`、clang 不带 `.exe`、另配 JDK）。
 - 音效仍未编进程序（与 Windows 版一致，上游一直是"试听候选"状态）。
 
 ## 排障记录
