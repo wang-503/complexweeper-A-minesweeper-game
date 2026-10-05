@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用名：与程序里的 APP_TITLE 一致（改版本号时 build.ps1 会核对这里不需要改） -->
+<resources>
+    <string name="app_name">复扫雷 Complexweeper</string>
+</resources>

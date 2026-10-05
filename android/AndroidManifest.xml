@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  复扫雷 Complexweeper · 安卓版
+
+  这是一个**纯原生**应用：没有一行 Java/Kotlin，所以 android:hasCode="false"，
+  APK 里也不会出现 classes.dex。入口是系统自带的 android.app.NativeActivity，
+  它加载 libcomplexsweeper.so 并调用里面的 android_main（见 src/platform_android.c）。
+
+  屏幕方向固定横屏（sensorLandscape，两个横屏方向都能转）：
+  高级盘是 30 格宽，竖屏下每格只有 10 来个物理像素，手指点不准。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.complexsweeper.game"
+    android:versionCode="10013"
+    android:versionName="1.0.13">
+
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35" />
+
+    <!-- 只要有 OpenGL ES 2.0 的设备；这是唯一的功能性要求 -->
+    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="false"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|smallestScreenSize|uiMode|navigation"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+
+            <!-- 告诉 NativeActivity 该加载哪个 .so（去掉 lib 前缀与 .so 后缀） -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="complexsweeper" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
