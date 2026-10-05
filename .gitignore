@@ -1,0 +1,25 @@
+# ---- Windows 版 ----
+# 本地构建产物（上游也不跟踪）
+正式版/复扫雷*.exe
+正式版/build/
+正式版/src/atlas.bin
+正式版/src/assets.zig
+
+# ---- 安卓版 ----
+# 工具链缓存（NDK / build-tools / platform / zig，第一次构建时下载，之后复用）
+android/.android-tools/
+# 全部构建产物
+android/build/
+# 由 tools/gen_atlas.js（与 正式版/ 共用同一份脚本）生成的图集副本，构建时产出
+android/assets/atlas.bin
+# 本地签名用的调试密钥（构建时自动生成）
+android/*.keystore
+
+# 注意：下面这几个**是生成物，但故意入库**，不要往这里加 ——
+#   android/assets/font_atlas.bin   中文字形位图（Windows System.Drawing 位图化）
+#   android/src/font_meta.h         字形度量表（与图集一起生成）
+#   android/tools/font.stamp        上面两份脚本的哈希戳（判断要不要重新生成）
+#   android/src/ui_strings.h        界面文案表（tools/gen_ui_strings.js 生成）
+# 理由：字形流水线依赖 Windows 的 System.Drawing，换机器/换字体度量会有差异；
+# 提交生成物才能保证任何人 clone 下来都能**开箱构建**，且与已发布的 APK 一致。
+# 想让本机重新生成：`android/build.ps1 -RegenFont`（需要 Windows）。
