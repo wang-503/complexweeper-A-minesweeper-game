@@ -80,7 +80,12 @@ function Get-SdkCandidates {
             (Join-Path ${env:ProgramFiles(x86)} 'Android\android-sdk'))) {
         if ($p -and (Test-Path -LiteralPath $p)) { $out += $p }
     }
-    return ($out | Select-Object -Unique)
+    # **必须用逗号包住**：只有一个候选时，`return ($out | Select-Object -Unique)`
+    # 会被 PowerShell 解包成单个字符串；调用方 `[string[]]$Roots` 于是拿到字符串，
+    # 参数绑定会把它**逐字符**展开成 ['C',':','\','A',...]，Test-Path 'C' 全失败，
+    # 候选列表就空了 —— 表现为"明明装了 build-tools r36 却去下载"，
+    # 进而让"按版本挑 build-tools/platform"整套逻辑静默失效。
+    return , @($out | Select-Object -Unique)
 }
 
 # 在若干候选目录里找一个文件/目录；返回绝对路径或 $null
@@ -159,18 +164,86 @@ function Get-Toolchain {
     }
 
     # ---------------- build-tools ----------------
+    # **必须按版本挑，不能"找到哪个用哪个"。**
+    #
+    # 这个坑是在 GitHub Actions 上暴露的：runner 预装了 build-tools 34.0.0 与
+    # platform-34，而原来的探测逻辑用 `Get-ChildItem -Recurse | Select-Object -First 1`，
+    # 于是拿到了 34.0.0 —— $btver 这个变量定义了却从来没被使用。
+    # 结果 build-tools 34 的 aapt2 产出的 APK，`dump badging` 读不到 minSdkVersion
+    # （只读得到 targetSdkVersion），check_apk.js 报 "minSdk 不低于 24" 失败。
+    # 本机之所以一直没事，纯粹是因为本机只装了 r36。
+    #
+    # 所以：候选按**版本降序**排，取第一个 ≥ 最低要求的；都不满足才下载固定版本。
+    # 版本以 `aapt2 version` **自己报的**为准，不靠目录名 —— build-tools r36 的官方
+    # zip 解出来叫 `android-16`、platform-35 的 zip 解出来叫 `android-35`，
+    # 目录名既不一定是版本号、还会互相撞车。
     $btver = '36.0.0'
-    $aapt2 = Find-In -Roots $root -Leaf 'aapt2.exe'
-    if (-not $aapt2) { $aapt2 = Find-In -Roots $sdkRoots -Leaf 'aapt2.exe' }
-    if (-not $aapt2) {
-        if ($SkipDownload) { $missing += 'build-tools（aapt2/zipalign/apksigner）' }
+    $btMin = [version]'2.20'     # aapt2 报的是 2.NN，r36 = 2.20
+    # 注意：**返回列表本身**（逗号包一层），不要写成 `return @(...)`。
+    # PowerShell 会把 @() 里的元素展开成"多个返回值"，调用方拿到的 $c 就成了数组，
+    # 于是 `$c.Ver -ge $min` 变成**数组比较**（结果也是数组、在 if 里恒真），
+    # `$c.Dir` 也会变成数组、拼起来是 "路径A 路径B" —— 传给 aapt2 直接失败。
+    # 这个坑是实测出来的：日志里出现过
+    #   platform = android-35 35 (C:\...\platform\android-35 C:\...\plat\android-35)
+    function Get-Aapt2Candidates([string[]]$Roots) {
+        $seen = @{}
+        $out = New-Object System.Collections.ArrayList
+        foreach ($r in $Roots) {
+            if (-not $r -or -not (Test-Path -LiteralPath $r)) { continue }
+            foreach ($h in (Get-ChildItem -LiteralPath $r -Filter 'aapt2.exe' -Recurse -ErrorAction SilentlyContinue)) {
+                $dir = Split-Path $h.FullName -Parent
+                if ($seen.ContainsKey($dir)) { continue }
+                $seen[$dir] = $true
+                $ver = [version]'0.0'
+                try {
+                    # 版本以 aapt2 自己报的为准。走 `cmd /c` 取输出（与 build.ps1 的
+                    # Invoke-Native 同一路子）：直接 `& $exe version` 时，aapt2 写到
+                    # stderr 的版本行会被 PowerShell 包成 ErrorRecord，
+                    # 在 try 块里会打断后面的解析，$ver 就一直是 0.0。
+                    $txt = [string](& cmd.exe /c "`"$($h.FullName)`" version 2>&1")
+                    $m = [regex]::Match($txt, '(\d+)\.(\d+)')
+                    if ($m.Success) { $ver = [version]("$($m.Groups[1].Value).$($m.Groups[2].Value)") }
+                    Write-Host ("[工具链]   探测 aapt2 " + $dir + " → " + $ver)
+                } catch {
+                    Write-Host ("[工具链]   探测 aapt2 " + $dir + " 失败：" + $_.Exception.Message)
+                }
+                [void]$out.Add([pscustomobject]@{ Dir = $dir; Ver = $ver; Aapt2 = $h.FullName })
+            }
+        }
+        # 过滤掉 $null：`@($x)[0].Prop` 在 $x[0] 为 $null 时返回的是**空数组**
+        # （在 if 里为真！），于是 $aapt2 会变成数组、Split-Path 返回多个父目录，
+        # 命令行里就出现 "路径A 路径B" 这种非法参数
+        # （实测报 "The filename, directory name, or volume label syntax is incorrect."）。
+        return , @($out | Where-Object { $_ } | Sort-Object -Property Ver -Descending)
+    }
+
+    $aapt2 = $null
+    $btChosen = $null
+    # flatten：函数返回的是"数组"，`@(f(), g())` 会变成**嵌套数组**，
+    # 于是 $c 是数组、$c.Ver -ge $btMin 变成数组比较。用加法拼平。
+    $allBt = @()
+    $allBt += Get-Aapt2Candidates @($root)
+    $allBt += Get-Aapt2Candidates $sdkRoots
+    foreach ($c in $allBt) {
+        if ($c -and -not $btChosen -and $c.Ver -ge $btMin) { $btChosen = $c }
+    }
+    if ($btChosen) {
+        Write-Host ("[工具链] build-tools = aapt " + $btChosen.Ver + "  (" + $btChosen.Dir + ")")
+        $aapt2 = $btChosen.Aapt2
+    }
+    else {
+        # 机器上只有更旧的 build-tools：**不要凑合**，下载工程要求的版本。
+        # 静默降级正是上面那个 CI 故障的根源。
+        $foundTxt = if ($allBt.Count) { ($allBt | ForEach-Object { $_.Ver.ToString() }) -join ', ' } else { '无' }
+        if ($SkipDownload) { $missing += "build-tools aapt >= $btMin（现有：$foundTxt）" }
         else {
-            Write-Host '[工具链] build-tools 没找到，下载 r36（约 56 MB）'
+            Write-Host "[工具链] 机器上的 build-tools 是 [$foundTxt]，低于要求的 aapt $btMin，下载 r36（约 56 MB）"
             $zip = Join-Path $root 'pkg\build-tools_r36_windows.zip'
             Get-RemoteFile -Url 'https://dl.google.com/android/repository/build-tools_r36_windows.zip' -Dest $zip -MinBytes 20MB
             # 这个包解出来是一层 android-16/ 目录，内容就是 build-tools 本体
             Expand-Zip -Zip $zip -Dest (Join-Path $root 'build-tools')
-            $aapt2 = Find-In -Roots $root -Leaf 'aapt2.exe'
+            $again = @(Get-Aapt2Candidates @($root))
+            if ($again.Count) { $btChosen = $again[0]; $aapt2 = $btChosen.Aapt2 }
         }
     }
     if ($aapt2) {
@@ -182,16 +255,59 @@ function Get-Toolchain {
     }
 
     # ---------------- platform（为 android.jar） ----------------
-    $androidJar = Find-In -Roots $root -Leaf 'android.jar'
-    if (-not $androidJar) { $androidJar = Find-In -Roots $sdkRoots -Leaf 'android.jar' }
-    if (-not $androidJar) {
-        if ($SkipDownload) { $missing += 'platform-35（android.jar）' }
+    # 同样按 API 版本挑，理由与 build-tools 相同：别拿了机器上的 platform-34 就用。
+    # android.jar 自己不带版本，但同目录下的 source.properties 里有 ApiLevel。
+    $platMin = 35
+    function Get-PlatformCandidates([string[]]$Roots) {
+        $seen = @{}
+        $out = New-Object System.Collections.ArrayList
+        foreach ($r in $Roots) {
+            if (-not $r -or -not (Test-Path -LiteralPath $r)) { continue }
+            foreach ($h in (Get-ChildItem -LiteralPath $r -Filter 'android.jar' -Recurse -ErrorAction SilentlyContinue)) {
+                $dir = Split-Path $h.FullName -Parent
+                if ($seen.ContainsKey($dir)) { continue }
+                $seen[$dir] = $true
+                $api = 0
+                $sp = Join-Path $dir 'source.properties'
+                if (Test-Path -LiteralPath $sp) {
+                    $m = [regex]::Match((Get-Content -LiteralPath $sp -Raw -ErrorAction SilentlyContinue),
+                                        'AndroidVersion\.ApiLevel\s*=\s*(\d+)')
+                    if ($m.Success) { $api = [int]$m.Groups[1].Value }
+                }
+                if ($api -eq 0) {
+                    $m2 = [regex]::Match($dir, 'android-(\d+)$')   # 退路：目录名
+                    if ($m2.Success) { $api = [int]$m2.Groups[1].Value }
+                }
+                [void]$out.Add([pscustomobject]@{ Dir = $dir; Api = $api; Jar = $h.FullName })
+            }
+        }
+        # 同 Get-Aapt2Candidates：必须用逗号包住（否则元素被展开成多返回值），
+        # 并且要过滤 $null（否则 "空数组在 if 里为真" 会把路径拼坏）
+        return , @($out | Where-Object { $_ } | Sort-Object -Property Api -Descending)
+    }
+
+    $androidJar = $null
+    $platChosen = $null
+    $allPlat = @()
+    $allPlat += Get-PlatformCandidates @($root)
+    $allPlat += Get-PlatformCandidates $sdkRoots
+    foreach ($c in $allPlat) {
+        if ($c -and -not $platChosen -and $c.Api -ge $platMin) { $platChosen = $c }
+    }
+    if ($platChosen) {
+        Write-Host ("[工具链] platform    = android-" + $platChosen.Api + "  (" + $platChosen.Dir + ")")
+        $androidJar = $platChosen.Jar
+    }
+    else {
+        $foundTxt = if ($allPlat.Count) { ($allPlat | ForEach-Object { 'android-' + $_.Api }) -join ', ' } else { '无' }
+        if ($SkipDownload) { $missing += "platform-$platMin（android.jar，现有：$foundTxt）" }
         else {
-            Write-Host '[工具链] android.jar 没找到，下载 platform-35（约 61 MB）'
+            Write-Host "[工具链] 机器上的 platform 是 [$foundTxt]，低于要求的 android-$platMin，下载 platform-35（约 61 MB）"
             $zip = Join-Path $root 'pkg\platform-35_r02.zip'
             Get-RemoteFile -Url 'https://dl.google.com/android/repository/platform-35_r02.zip' -Dest $zip -MinBytes 20MB
             Expand-Zip -Zip $zip -Dest (Join-Path $root 'platform')
-            $androidJar = Find-In -Roots $root -Leaf 'android.jar'
+            $again = @(Get-PlatformCandidates @($root))
+            if ($again.Count) { $androidJar = $again[0].Jar }
         }
     }
     if ($androidJar) { $tc.AndroidJar = $androidJar }
