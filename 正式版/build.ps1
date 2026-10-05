@@ -78,12 +78,14 @@ Copy-Item $final $versioned -Force
 if (-not $NoTest) {
     Write-Host "`n[4/4] 自检…"
     $rep = Join-Path $root 'build\selftest.txt'
-    $p = Start-Process -FilePath $final -ArgumentList '--selftest', $rep -Wait -PassThru -NoNewWindow
+    # -ArgumentList 不做引号处理，路径里的空格会把参数切成两半（`C:\Code Programs\...`
+    # 这种工作区就直接报"找不到文件"、exit 2）。所以自己带引号，且用整串形式传。
+    $p = Start-Process -FilePath $final -ArgumentList "--selftest `"$rep`"" -Wait -PassThru -NoNewWindow
     Get-Content $rep -Encoding UTF8
     if ($p.ExitCode -ne 0) { throw "规则自检失败" }
 
     $rep2 = Join-Path $root 'build\uitest.txt'
-    $p2 = Start-Process -FilePath $final -ArgumentList '--uitest', $rep2 -Wait -PassThru -NoNewWindow
+    $p2 = Start-Process -FilePath $final -ArgumentList "--uitest `"$rep2`"" -Wait -PassThru -NoNewWindow
     Get-Content $rep2 -Encoding UTF8
     if ($p2.ExitCode -ne 0) { throw "界面自检失败" }
 }

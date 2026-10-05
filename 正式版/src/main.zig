@@ -573,7 +573,7 @@ fn repaint(hwnd: w.HWND) void {
 /// 窗口标题固定不变（难度、局面信息都不往标题里塞）
 const APP_TITLE = "复扫雷 Complexweeper";
 /// 版本号：**只有这一处**。以后每次改动都顺手把它 +1，关于对话框与两个自检报告的抬头都读它。
-const APP_VERSION = "1.0.12";
+const APP_VERSION = "1.0.13";
 
 // ------------------------------------------------------------------ 棋盘交互
 fn cellAt(L: Layout, px: i32, py: i32) i32 {
@@ -1511,13 +1511,20 @@ fn dumpPath() ?[]const u8 {
     if (dump_path_len == 0) return null;
     return dump_path_buf[0..dump_path_len];
 }
+/// 跨端规则指纹的输出路径（安卓版对拍用）
+var rules_dump_path_buf: [260]u8 = undefined;
+var rules_dump_path_len: usize = 0;
+fn rulesDumpPath() ?[]const u8 {
+    if (rules_dump_path_len == 0) return null;
+    return rules_dump_path_buf[0..rules_dump_path_len];
+}
 
 /// 把当前局面写成文本，用于核对计数器数值等方法：--dump out.txt
 
 fn parseArgs() void {
     var it = std.process.argsWithAllocator(std.heap.page_allocator) catch return;
     defer it.deinit();
-    var expect: enum { none, shot, selftest, dump, uitest } = .none;
+    var expect: enum { none, shot, selftest, dump, uitest, rules_dump } = .none;
     _ = &window_shot;
     while (it.next()) |arg| {
         switch (expect) {
@@ -1541,12 +1548,18 @@ fn parseArgs() void {
                 expect = .none;
                 continue;
             },
+            .rules_dump => {
+                rules_dump_path_len = copyPath(&rules_dump_path_buf, arg);
+                expect = .none;
+                continue;
+            },
             .none => {},
         }
         if (std.mem.eql(u8, arg, "--shot")) expect = .shot;
         if (std.mem.eql(u8, arg, "--selftest")) expect = .selftest;
         if (std.mem.eql(u8, arg, "--dump")) expect = .dump;
         if (std.mem.eql(u8, arg, "--uitest")) expect = .uitest;
+        if (std.mem.eql(u8, arg, "--rules-dump")) expect = .rules_dump;
         if (std.mem.eql(u8, arg, "--demo")) demo_mode = .mid;
         if (std.mem.eql(u8, arg, "--demo-lose")) demo_mode = .lose;
         if (std.mem.eql(u8, arg, "--demo-win")) demo_mode = .win;
@@ -1643,6 +1656,11 @@ fn setupDemo() void {
 
 pub fn main() void {
     parseArgs();
+    // 跨端规则指纹：只跑规则层，不需要窗口，安卓版用同一个开关对拍
+    if (rulesDumpPath()) |p| {
+        const code = runRulesDump(p);
+        w.ExitProcess(@intCast(code));
+    }
     if (selftestPath()) |p| {
         const code = runSelftest(p);
         w.ExitProcess(@intCast(code));
@@ -1909,8 +1927,132 @@ fn dumpState(path: []const u8) void {
     f.writeAll(s.items) catch {};
 }
 
-fn runSelftest(path: []const u8) u32 {
-    var buf: [8192]u8 = undefined;
+// ------------------------------------------------------------------ 跨端规则指纹
+// 安卓版的规则是 game.c 里的 C 实现（Zig 0.14.1 没法给 Android 链接 libc），
+// 所以规则有两份。`--rules-dump` 让两端在同样的种子与开局格下各写一遍局面指纹，
+// 由 android/tools/parity_check.js 逐字对比：只有完全一致才算过。
+// 这一层**只用规则、不碰界面**，所以它能在无窗口的情况下跑。
+//
+// 两端这一个函数必须保持等价（形状表、种子表、开局格的取法、哈希算法都一样）。
+fn fnv1a32(h0: u32, v: u32) u32 {
+    var h = h0;
+    h ^= v & 0xFF;
+    h *%= 16777619;
+    h ^= (v >> 8) & 0xFF;
+    h *%= 16777619;
+    h ^= (v >> 16) & 0xFF;
+    h *%= 16777619;
+    h ^= (v >> 24) & 0xFF;
+    h *%= 16777619;
+    return h;
+}
+
+// 逐格签名：每个格子写成 "雷类型/显示值/状态"（例如 "1/0/3"），逐字对比就能
+// 定位到具体是哪一格不一样。比只比一个哈希值好排查得多。
+//   状态：1 = 已翻开，2 = 插了旗，3 = 又翻开又插旗（正常不该出现）
+fn dumpBoardSignature(gm: *const g.Game, s: *std.ArrayList(u8)) void {
+    var i: usize = 0;
+    while (i < gm.n) : (i += 1) {
+        if (i != 0) {
+            if (i % gm.w == 0) {
+                s.writer().print("\n", .{}) catch {};
+            } else {
+                s.writer().print(" ", .{}) catch {};
+            }
+        }
+        const st: u8 = (if (gm.open[i] != 0) @as(u8, 1) else 0) + (if (gm.flag[i] != 0) @as(u8, 2) else 0);
+        s.writer().print("{d}/{d}/{d}", .{ gm.mine[i], gm.clue[i], st }) catch {};
+    }
+    s.writer().print("\n", .{}) catch {};
+}
+
+fn dumpBoard(gm: *const g.Game, s: *std.ArrayList(u8)) void {
+    var h: u32 = 2166136261;
+    for (0..gm.n) |i| {
+        h = fnv1a32(h, gm.mine[i]);
+        h = fnv1a32(h, @as(u32, @as(u16, @bitCast(gm.clue[i]))));
+        h = fnv1a32(h, @as(u32, gm.open[i]) | (@as(u32, gm.flag[i]) << 2));
+    }
+    s.writer().print("  board {d}x{d} m={d} tc={d}/{d}/{d}/{d} start={d} opened={d} mines={d} fnv={x:0>8}\n", .{
+        gm.w,        gm.h,             gm.mines,
+        gm.type_count[1], gm.type_count[2], gm.type_count[3], gm.type_count[4],
+        gm.start_cell,    gm.openedCount(), gm.mines,
+        h,
+    }) catch {};
+    dumpBoardSignature(gm, s);
+}
+
+const DUMP_SEEDS = [_]u32{ 1, 2, 3, 12345, 999, 20260101, 4111, 4127, 4133, 4139, 4153, 4159, 7777, 31337 };
+const DumpShape = struct { w: u16, h: u16, m: u16, tc: [5]u16 };
+const DUMP_SHAPES = [_]DumpShape{
+    .{ .w = 9, .h = 9, .m = 10, .tc = .{ 0, 0, 0, 0, 0 } },
+    .{ .w = 16, .h = 16, .m = 40, .tc = .{ 0, 0, 0, 0, 0 } },
+    .{ .w = 30, .h = 16, .m = 99, .tc = .{ 0, 0, 0, 0, 0 } },
+    .{ .w = 40, .h = 30, .m = 60, .tc = .{ 0, 0, 0, 0, 0 } },
+    .{ .w = 12, .h = 12, .m = 14, .tc = .{ 0, 0, 7, 0, 7 } },
+    .{ .w = 12, .h = 12, .m = 10, .tc = .{ 0, 3, 2, 4, 1 } },
+    .{ .w = 20, .h = 20, .m = 40, .tc = .{ 0, 10, 10, 10, 10 } },
+};
+
+fn runRulesDump(path: []const u8) u32 {
+    const file = std.fs.cwd().createFile(path, .{}) catch return 2;
+    defer file.close();
+    var s = std.ArrayList(u8).init(std.heap.page_allocator);
+    defer s.deinit();
+    s.writer().print("复扫雷 {s} · 规则指纹\n==========================\n", .{APP_VERSION}) catch {};
+
+    var gm: g.Game = .{};
+    for (DUMP_SHAPES, 0..) |sh, si| {
+        var sum: u16 = 0;
+        for (1..5) |t| sum += sh.tc[t];
+        const mines: u16 = if (sum > 0) sum else sh.m;
+        const bw: usize = sh.w;
+        const bh: usize = sh.h;
+        const starts = [_]usize{ 0, bw / 2, (bh / 2) * bw + bw / 2, bw * bh - 1 };
+        for (DUMP_SEEDS) |seed| {
+            for (starts) |st| {
+                gm = .{};
+                gm.w = sh.w;
+                gm.h = sh.h;
+                gm.mines = mines;
+                for (1..5) |t| gm.type_count[t] = sh.tc[t];
+                gm.newGame(seed);
+                gm.startAt(st, 0);
+                s.writer().print("shape={d} seed={d} start={d}\n", .{ si, seed, st }) catch {};
+                dumpBoard(&gm, &s);
+            }
+        }
+    }
+
+    // 再来一段操作序列的指纹：插旗 → 撤旗 → 展开，确认操作语义也一致
+    gm = .{};
+    gm.w = 12;
+    gm.h = 12;
+    gm.mines = 24;
+    for (1..5) |t| gm.type_count[t] = 0;
+    gm.newGame(4242);
+    gm.startAt(70, 0);
+    s.writer().print("ops seed=4242\n", .{}) catch {};
+    for (0..gm.n) |i| {
+        if (gm.open[i] == 0) {
+            _ = gm.cycleFlag(i);
+            _ = gm.cycleFlag(i);
+        }
+    }
+    dumpBoard(&gm, &s);
+    for (0..gm.n) |i| _ = gm.setFlag(i, 0);
+    dumpBoard(&gm, &s);
+    for (0..gm.n) |i| {
+        if (gm.open[i] != 0) gm.tryExpand(i);
+    }
+    dumpBoard(&gm, &s);
+
+    s.writer().print("dump_truncated=0\n", .{}) catch {};
+    file.writeAll(s.items) catch return 2;
+    return 0;
+}
+
+fn runSelftest(path: []const u8) u32 {    var buf: [8192]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     var out = std.ArrayList(u8).init(fba.allocator());
     const fails = selftest.run(&out);
