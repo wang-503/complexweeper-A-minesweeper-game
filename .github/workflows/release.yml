@@ -1,6 +1,11 @@
 name: release
 
-# 推 v* 标签 → 构建 → 建 Release 并附上 exe（中文名 + 一个纯 ASCII 名，省得下载链接被转义）
+# 推 v* 标签 → 构建 Windows 版与安卓版 → 建 Release 并附上 exe 与 apk。
+#
+# 附件一律用**纯 ASCII 名**：gh 会把带空格的文件名按空格拆参数，
+# 传上去只剩后半截（复扫雷 1.0.11.exe → 1.0.11.exe，踩过）。内容一样，就是同一个产物。
+#
+# 幂等：release 已存在时只 --clobber 覆盖附件，所以标签推错了可以重推标签修复。
 on:
   push:
     tags: ['v*']
@@ -19,6 +24,13 @@ jobs:
         with:
           node-version: '20'
 
+      # android/build.ps1 用 JDK 的 java/keytool；runner 上默认那个未必是 21，
+      # 显式装一个，免得 apksigner / keytool 挑到别的版本。
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
       - name: 装 Zig 0.14.1
         shell: pwsh
         run: |
@@ -36,33 +48,96 @@ jobs:
           Write-Host "zig = $got"
           if ($got -ne '0.14.1') { throw "Zig 版本不对：$got，本工程按 0.14.1 写" }
 
-      - name: 构建 + 两套自检
+      - name: 构建 Windows 版 + 两套自检
         shell: pwsh
         run: ./正式版/build.ps1
 
-      - name: 发 Release
+      # **必须在 Windows 版之后**：跨端对照要拿 正式版/复扫雷.exe 当参照物。
+      # NDK / build-tools / platform 缺了会自动下载到 android/.android-tools/
+      # （首次约 900 MB，会拖慢发布；这里先不接缓存，保持简单）。
+      - name: 构建安卓版 + 自检 + 跨端对照
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
+        run: ./android/build.ps1
+
+      - name: 组装附件
+        shell: pwsh
         run: |
           $v = [regex]::Match((Get-Content '正式版/src/main.zig' -Raw -Encoding UTF8), 'const APP_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)";').Groups[1].Value
           if (-not $v) { throw '读不到 APP_VERSION' }
           $exe = "正式版/复扫雷 $v.exe"
+          $apk = "android/build/复扫雷-android-$v.apk"
           if (-not (Test-Path $exe)) { throw "找不到产物：$exe" }
-          # 附件只传纯 ASCII 名：gh 会按空格拆参数，带空格的名字传上去只剩后半截
-          # （复扫雷 1.0.11.exe → 1.0.11.exe，踩过）。文件内容一样，就是同一个 exe。
-          $ascii = "complexweeper-$v-win64.exe"
-          Copy-Item $exe $ascii -Force
-          $tag = "${{ github.ref_name }}"
+          if (-not (Test-Path $apk)) { throw "找不到产物：$apk" }
+          Copy-Item $exe "complexweeper-$v-win64.exe" -Force
+          Copy-Item $apk "complexweeper-$v-android.apk" -Force
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "产物就绪：complexweeper-$v-win64.exe 与 complexweeper-$v-android.apk"
+
+      - name: 生成 Release 说明
+        shell: pwsh
+        run: |
+          $v = $env:VERSION
+          $exe = "complexweeper-$v-win64.exe"
+          $apk = "complexweeper-$v-android.apk"
+          $exeHash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          $apkHash = (Get-FileHash $apk -Algorithm SHA256).Hash
+          $exeSize = [math]::Round((Get-Item $exe).Length / 1KB)
+          $apkSize = [math]::Round((Get-Item $apk).Length / 1KB)
+          # **这里的 here-string 必须用单引号 @'...'@**：正文里有 GitHub 的
+          # ${{ ... }} 表达式，双引号 here-string 里 PowerShell 会把 `${{` 当变量语法
+          # 直接报语法错误（本地解析器抓到的就是这个）。改成单引号后不插值，
+          # 需要拼接的地方用字符串加法。
+          # 另外正文里的反引号是 Markdown 行内代码，单引号 here-string 不转义它们，
+          # 所以不用写成双反引号。
+          $repoUrl = 'https://github.com/' + $env:GITHUB_REPOSITORY
+          $body = @'
+          ## 下载
+
+          | 平台 | 文件 | 大小 | 说明 |
+          | --- | --- | --- | --- |
+          | Windows | `EXE` | EXESIZE KB | 单个 exe，双击即用，不需要 .NET / 运行库 / 安装 |
+          | Android | `APK` | APKSIZE KB | Android 7.0+（API 24），arm64-v8a 与 x86_64，仅横屏 |
+
+          ## SHA-256
+
+          ```
+          EXEHASH  EXE
+          APKHASH  APK
+          ```
+
+          ## 这一版跑了哪些验证
+
+          - Windows 版自检 **197 项**断言
+          - 安卓规则自检 **35 项**、安卓界面自检 **1592 项**（8 种窗口 × 多档密度 × 3 档预置）
+          - **395 个局面的跨端规则对照**（逐格签名，验证两版规则等价）
+          - APK 结构校验（无 classes.dex、.so 未压缩、ABI 目录、权限与版本号）
+          '@
+          $body = $body.Replace('EXEHASH', $exeHash).Replace('APKHASH', $apkHash).
+                          Replace('EXESIZE', "$exeSize").Replace('APKSIZE', "$apkSize").
+                          Replace('EXE', $exe).Replace('APK', $apk)
+          $body += "`n完整改动见 [提交历史]($repoUrl/commits/$tag)。`n"
+          $body | Out-File -FilePath release-notes.md -Encoding utf8
+
+      - name: 建 / 更新 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = $env:VERSION
+          $tag = $env:GITHUB_REF_NAME
+          $exe = "complexweeper-$v-win64.exe"
+          $apk = "complexweeper-$v-android.apk"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $ascii --clobber
+            Write-Host "Release $tag 已存在 → 覆盖附件"
+            gh release upload $tag $exe $apk --clobber
+            gh release edit $tag --notes-file release-notes.md --latest | Out-Null
           } else {
-            gh release create $tag $ascii `
+            gh release create $tag $exe $apk `
               --title "复扫雷 Complexweeper $v" `
-              --generate-notes `
+              --notes-file release-notes.md `
               --verify-tag
+            gh release edit $tag --draft=false --latest | Out-Null
           }
-          gh release edit $tag --draft=false --latest | Out-Null
           Write-Host '--- Release 附件 ---'
           gh release view $tag --json assets --jq '.assets[] | "  \(.name)  \(.size) 字节"'
