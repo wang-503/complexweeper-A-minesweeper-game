@@ -17,9 +17,11 @@ android/*.keystore
 
 # 注意：下面这几个**是生成物，但故意入库**，不要往这里加 ——
 #   android/assets/font_atlas.bin   中文字形位图（Windows System.Drawing 位图化）
-#   android/src/font_meta.h         字形度量表（与图集一起生成）
-#   android/tools/font.stamp        上面两份脚本的哈希戳（判断要不要重新生成）
+#   android/src/font_meta.h         字形度量表（随图集生成，内含生成源哈希）
 #   android/src/ui_strings.h        界面文案表（tools/gen_ui_strings.js 生成）
+#   android/src/assets.h            素材槽位下标（tools/gen_ui_strings.js 生成）
 # 理由：字形流水线依赖 Windows 的 System.Drawing，换机器/换字体度量会有差异；
 # 提交生成物才能保证任何人 clone 下来都能**开箱构建**，且与已发布的 APK 一致。
+# 判断"要不要重新生成"靠 font_meta.h 里自带的 FONT_SRC_HASH 自洽对比，
+# 不需要额外 stamp 文件（见 build.ps1 里的说明）。
 # 想让本机重新生成：`android/build.ps1 -RegenFont`（需要 Windows）。

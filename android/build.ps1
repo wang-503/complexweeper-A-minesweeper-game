@@ -64,6 +64,15 @@ $assetsDir = Join-Path $root 'assets'
 function Say([string]$msg) { if (-not $Quiet) { Write-Host $msg } }
 function Fail([string]$msg) { throw $msg }
 
+# 先决条件：所有 .ps1 必须带 UTF-8 BOM。
+# PowerShell 5.1 读无 BOM 的 UTF-8 文件会按 ANSI 解析 → 中文注释全乱码 →
+# 直接报 "Missing type name after '['" 之类的语法错误，而且报错位置完全指不到真因。
+# 编辑工具保存时很容易把 BOM 去掉，所以每次构建先查一遍（这条已经在 CI 里也有）。
+if ((Invoke-Native 'powershell' @('-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', (Join-Path $root 'tools\check_bom.ps1'))) -ne 0) {
+    Fail '有 .ps1 缺 UTF-8 BOM（见上面的列表）；补齐后重试'
+}
+
 # ABI → NDK 目标三元组 + API 级别
 function Get-AbiTarget([string]$abi) {
     switch ($abi) {
@@ -120,40 +129,37 @@ if ($uiVer -ne $version) {
 
 # 字形图集：只要 ui_strings.js 或 gen_font.js 变了就必须重生成。
 #
-# **gen_font.js 也必须进哈希**：它决定图集怎么排布。只按 ui_strings.js 判断的话，
-# 改了排布逻辑却"文案没变"，就会一直复用按旧逻辑生成的图集 ——
-# 我踩过这个坑：修好了"每页补齐到统一高度"，构建却因为哈希没变而沿用坏图集，
-# 结果设备上文字依旧乱码，排查多花了一轮。
+# **判断方式：自洽对比，不依赖任何额外的 stamp 文件。**
+# gen_font.js 会把 `FONT_SRC_HASH = sha256(ui_strings.js) + sha256(gen_font.js)`
+# 写进它生成的 src/font_meta.h；这里现场重算一遍、和那份产物里记的比。
+# 一致且 font_atlas.bin 也在 → 直接复用；否则重新跑字形流水线。
 #
-# **font.stamp 放在 `tools/`（入库）而不是 `build/`（已 gitignore）**：
-# 这样新克隆的仓库里 stamp 与 font_meta.h / font_atlas.bin 是配套的，开箱即用。
-#   · 想让本机构建重新位图化字形：加 `-RegenFont`，或直接删掉 tools/font.stamp
-#   · 字形流水线依赖 Windows 的 System.Drawing，而且换字体度量会略有差异，
-#     所以开源仓库里**直接提交生成物**，保证任何人（含 Linux CI）都能照常构建。
-$fontStamp = Join-Path $root 'tools\font.stamp'
+# 为什么不用 stamp 文件（前后踩过两次）：
+#   1. 放在 build/（已 gitignore）→ 新克隆里没有，必然重新生成，而字形流水线
+#      依赖 Windows 的 System.Drawing，别人根本跑不了。
+#   2. 放在 tools/ 入库 → 又变成"stamp 与脚本可能不同步"。我改完 gen_font.js
+#      忘了更新它，构建就一直复用旧图集，真机表现为整屏乱码、排查很久。
+# 把哈希写进产物自己，就不存在"两份东西要同时更新"的问题了。
+#
+# gen_font.js 也必须进哈希：它决定图集怎么排布，只按文案判断会漏掉排布改动。
 $fontAtlasBin = Join-Path $assetsDir 'font_atlas.bin'
 $fontMetaH = Join-Path $srcDir 'font_meta.h'
 $fontHashSrc = (Get-FileHash -LiteralPath (Join-Path $root 'tools\ui_strings.js') -Algorithm SHA256).Hash +
                (Get-FileHash -LiteralPath (Join-Path $root 'tools\gen_font.js') -Algorithm SHA256).Hash
 
-# 三个条件都满足才复用：stamp 一致 + font_meta.h 在 + font_atlas.bin 在。
-# 早先只查前两个 —— 而 font_atlas.bin 被 gitignore 了，
-# 于是新克隆会走过"复用"分支、随后 check_atlas.js 报"找不到图集"直接失败。
 $needFont = $true
-if ((Test-Path -LiteralPath $fontStamp) -and
-    (Test-Path -LiteralPath $fontMetaH) -and
-    (Test-Path -LiteralPath $fontAtlasBin)) {
-    if ((Get-Content -LiteralPath $fontStamp -Raw).Trim() -eq $fontHashSrc) { $needFont = $false }
+if ((Test-Path -LiteralPath $fontMetaH) -and (Test-Path -LiteralPath $fontAtlasBin)) {
+    $metaText = [System.IO.File]::ReadAllText($fontMetaH, [System.Text.Encoding]::UTF8)
+    $m = [regex]::Match($metaText, '#define FONT_SRC_HASH "([0-9a-f]+)"')
+    if ($m.Success -and ($m.Groups[1].Value.ToUpperInvariant() -eq $fontHashSrc)) { $needFont = $false }
 }
 if ($RegenFont) { $needFont = $true }
 
 if ($needFont) {
-    # stamp 只在生成**成功之后**才写：否则一次失败的生成会留下"看起来是最新的"标记
     if ((Invoke-Native 'node' @((Join-Path $root 'tools\gen_font.js'))) -ne 0) { Fail '生成字形图集失败' }
-    Set-Content -LiteralPath $fontStamp -Value $fontHashSrc -Encoding ASCII
 }
 else {
-    Say "  字形图集是最新的（tools/font.stamp 与脚本一致），直接复用"
+    Say "  字形图集与当前脚本一致（font_meta.h 里的 FONT_SRC_HASH 对得上），直接复用"
 }
 
 # 中文字形覆盖率门禁：ui_strings.js 里出现的每个字符都必须在图集里。

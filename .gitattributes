@@ -1,0 +1,18 @@
+# 统一行尾：仓库里一律 LF，避免"clone 下来生成物就变成脏的"。
+#
+# 为什么需要：构建脚本会生成若干入库文件（android/src/font_meta.h、
+# android/src/ui_strings.h、android/src/assets.h 等），其中 font_meta.h 里带着
+# 一个"生成源哈希"用来判断要不要重新位图化字形。
+#
+# 如果 checkout 时把这些文件转成 CRLF，会出现两个后果：
+#   1. 每次 clone / 构建后 `git status` 都是脏的，看着像"构建改动了源码"；
+#   2. 哈希按**二进制**算，换行符一变就对不上，于是别人 clone 下来
+#      必然重新跑字形流水线 —— 而那条流水线需要 Windows 的 System.Drawing。
+# 统一成 LF 之后，生成物是平台无关的，跨系统拿到的是同一份字节。
+* text=auto eol=lf
+
+# 这些是真正的二进制，别做任何转换
+*.png binary
+*.bin binary
+*.keystore binary
+*.exe binary

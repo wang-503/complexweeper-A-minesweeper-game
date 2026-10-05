@@ -1,5 +1,12 @@
 // 本文件由 tools/gen_font.js 自动生成，不要手改。
 // 字形来自 tools/ui_strings.js 的文案清单，用构建机的系统字体位图化。
+//
+// 下面这个哈希 = sha256(tools/ui_strings.js) + sha256(tools/gen_font.js)，
+// 小写十六进制。build.ps1 会现场重算并对比它，决定要不要重新生成字形：
+//   · 一致 且 font_atlas.bin 在 → 直接复用（别人 clone 下来就是这样）
+//   · 不一致 / 产物缺失       → 跑字形流水线（需要 Windows 的 System.Drawing）
+#define FONT_SRC_HASH "8762abb9c2e18d6391448aea0f04ef0161dd8dd3b7c2a3042cb2856eaeab6e867b7072d5a10eeda6b848b7830c4cd7da3e1c98e49037e9c0483910b3d5f98135"
+
 #ifndef CS_FONT_META_H
 #define CS_FONT_META_H
 

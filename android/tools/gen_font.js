@@ -21,6 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..'); // android/
@@ -213,10 +214,34 @@ fs.mkdirSync(path.dirname(binPath), { recursive: true });
 fs.writeFileSync(binPath, Buffer.concat([header, ...pageBytes]));
 
 // ---- 5. 写 font_meta.h ----
+// **把「生成源哈希」写进 font_meta.h 自己**，而不是单独放一个 stamp 文件。
+//
+// 为什么：构建脚本要靠"哈希对不对"来决定要不要重新位图化字形，而字形流水线依赖
+// Windows 的 System.Drawing，仓库里提交了生成物就是为了让别人不用跑它。
+// 早先用的是 build/font.stamp（已 gitignore）—— 新克隆里根本没有，
+// 于是必然重新生成；后来改成 tools/font.stamp 入库，又出现「stamp 与脚本不同步」
+// 的隐患：改了脚本忘了更新 stamp，构建就会一直复用旧图集（踩过一次，
+// 表现为真机整屏乱码、排查很久）。
+//
+// 现在改成自洽：font_meta.h 里记着"我是由哪两个文件的哪个哈希生成的"，
+// build.ps1 现场重算、对比自己。缺任何一个产物、或哈希不符，就重新生成。
+// 哈希只与**内容**有关，跨平台 / 跨换行符都不变（文件按二进制读）。
+const hashSrc = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+const hashUi = hashSrc(path.join(root, 'tools', 'ui_strings.js'));
+const hashGen = hashSrc(__filename);
+const srcHash = (hashUi + hashGen).toLowerCase();
+
 const names = SIZES.map((s) => s.name);
 const lines = [];
 lines.push('// 本文件由 tools/gen_font.js 自动生成，不要手改。');
 lines.push('// 字形来自 tools/ui_strings.js 的文案清单，用构建机的系统字体位图化。');
+lines.push('//');
+lines.push('// 下面这个哈希 = sha256(tools/ui_strings.js) + sha256(tools/gen_font.js)，');
+lines.push('// 小写十六进制。build.ps1 会现场重算并对比它，决定要不要重新生成字形：');
+lines.push('//   · 一致 且 font_atlas.bin 在 → 直接复用（别人 clone 下来就是这样）');
+lines.push('//   · 不一致 / 产物缺失       → 跑字形流水线（需要 Windows 的 System.Drawing）');
+lines.push('#define FONT_SRC_HASH "' + srcHash + '"');
+lines.push('');
 lines.push('#ifndef CS_FONT_META_H');
 lines.push('#define CS_FONT_META_H');
 lines.push('');
