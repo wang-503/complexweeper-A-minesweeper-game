@@ -368,15 +368,39 @@ $apk = Join-Path $bldDir "复扫雷-android-$version.apk"
 Remove-Item -LiteralPath $apk -Force -ErrorAction SilentlyContinue
 $java = $tc.Java
 if (-not $java) { $java = 'java' }
-if ((Invoke-Native $java @('-jar', $tc.ApkSignerJar, 'sign', '--ks', $ks, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--v1-signing-enabled', 'true', '--v2-signing-enabled', 'true', '--out', $apk, $aligned)) -ne 0) { Fail 'apksigner 签名失败' }
+
+# **给 Java 工具喂纯 ASCII 路径**（先生成 signed.apk，最后再改成中文名）。
+#
+# 为什么：apksigner 是 Java 程序，它在 Windows 上会调
+# File.getCanonicalPath() → WinNTFileSystem.canonicalize0，而这条路走的是系统 ANSI
+# 代码页。GitHub Actions 的 runner 是非中文区域设置、任务路径又是
+# D:\a\... 这种纯 ASCII 路径，于是命令行里一旦出现中文的 `-out 复扫雷-...apk`
+# 就会直接抛：
+#     Exception in thread "main" java.io.IOException: Bad pathname
+# 本地中文系统上没事（ANSI 代码页是 936），所以只在 CI 上炸 —— 这类"只在别人机器上
+# 出问题"的坑必须在 CI 里跑过才能发现。
+# 顺带 zipalign 也一起用 ASCII 中间名，统一口径。
+$signed = Join-Path $bldDir 'signed.apk'
+Remove-Item -LiteralPath $signed -Force -ErrorAction SilentlyContinue
+if ((Invoke-Native $java @('-jar', $tc.ApkSignerJar, 'sign', '--ks', $ks, '--ks-pass', 'pass:android', '--key-pass', 'pass:android', '--v1-signing-enabled', 'true', '--v2-signing-enabled', 'true', '--out', $signed, $aligned)) -ne 0) { Fail 'apksigner 签名失败' }
+if (-not (Test-Path -LiteralPath $signed)) { Fail "apksigner 报成功但没生成 $signed" }
+Move-Item -LiteralPath $signed -Destination $apk -Force
+if (-not (Test-Path -LiteralPath $apk)) { Fail "改名后找不到 $apk" }
 
 
 
 
 # ------------------------------------------------------------------ 6 校验
 Say "`n[6/6] 校验 APK…"
-Invoke-Native 'node' @((Join-Path $root 'tools\check_apk.js'), $apk, $tc.Aapt2, $tc.ApkSignerJar, $java) | Out-Null
-if ($LASTEXITCODE -ne 0) { Fail 'APK 结构校验失败' }
+# 校验也走 ASCII 副本：check_apk.js 会用 apksigner verify 查签名，
+# 而它同样是 Java 程序 —— 直接喂中文路径会在非中文区域设置的机器上抛
+# "Bad pathname"（与上面签名那步是同一个坑）。校验完就把副本删掉。
+$apkForCheck = Join-Path $bldDir 'check.apk'
+Copy-Item -LiteralPath $apk -Destination $apkForCheck -Force
+Invoke-Native 'node' @((Join-Path $root 'tools\check_apk.js'), $apkForCheck, $tc.Aapt2, $tc.ApkSignerJar, $java) | Out-Null
+$checkOk = ($LASTEXITCODE -eq 0)
+Remove-Item -LiteralPath $apkForCheck -Force -ErrorAction SilentlyContinue
+if (-not $checkOk) { Fail 'APK 结构校验失败' }
 
 # 预览图（人工核对观感用；自检里已经有渲染断言，这里是给人看的）
 if (-not $SkipTests) {
